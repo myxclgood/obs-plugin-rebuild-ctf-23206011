@@ -1,0 +1,98 @@
+name: build-windows-dll-from-source-zip
+
+on:
+  push:
+    paths:
+      - 'obs_plugin_rebuild_source_for_ci.zip'
+      - '.github/workflows/build-from-source-zip.yml'
+  workflow_dispatch:
+    inputs:
+      with_onnxruntime:
+        description: 'Build with ONNX Runtime CPU API'
+        required: true
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+      ORT_VERSION: 1.18.1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract source zip
+        shell: pwsh
+        run: |
+          if (!(Test-Path obs_plugin_rebuild_source_for_ci.zip)) {
+            throw 'obs_plugin_rebuild_source_for_ci.zip not found'
+          }
+          New-Item -ItemType Directory -Force source | Out-Null
+          Expand-Archive obs_plugin_rebuild_source_for_ci.zip -DestinationPath source -Force
+          Get-ChildItem source | Format-Table Name,Length
+
+      - name: Setup vcpkg
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg $env:RUNNER_TEMP\vcpkg
+          & $env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat
+          echo "VCPKG_ROOT=$env:RUNNER_TEMP\vcpkg" >> $env:GITHUB_ENV
+
+      - name: Install OpenCV dnn
+        shell: pwsh
+        run: |
+          & $env:VCPKG_ROOT\vcpkg.exe install opencv4[dnn]:x64-windows
+
+      - name: Download ONNX Runtime CPU package
+        if: ${{ inputs.with_onnxruntime == 'true' || github.event_name == 'push' }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force deps | Out-Null
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$env:ORT_VERSION/onnxruntime-win-x64-$env:ORT_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile deps\onnxruntime.zip
+          Expand-Archive deps\onnxruntime.zip -DestinationPath deps -Force
+          echo "ONNXRUNTIME_ROOT=$pwd\deps\onnxruntime-win-x64-$env:ORT_VERSION" >> $env:GITHUB_ENV
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          $withOrt = ('${{ inputs.with_onnxruntime }}' -eq 'true') -or ('${{ github.event_name }}' -eq 'push')
+          $args = @(
+            '-S', 'source', '-B', 'build', '-A', 'x64',
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake",
+            '-DOBS_REBUILD_WITH_OPENCV=ON'
+          )
+          if ($withOrt) {
+            $args += '-DOBS_REBUILD_WITH_ONNXRUNTIME=ON'
+            $args += "-DONNXRUNTIME_ROOT=$env:ONNXRUNTIME_ROOT"
+          } else {
+            $args += '-DOBS_REBUILD_WITH_ONNXRUNTIME=OFF'
+          }
+          cmake @args
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Collect artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          Copy-Item build\Release\obs_plugin.dll artifact\obs_plugin.dll -Force
+          if (Test-Path "$env:VCPKG_ROOT\installed\x64-windows\bin") {
+            Copy-Item "$env:VCPKG_ROOT\installed\x64-windows\bin\*.dll" artifact\ -Force -ErrorAction SilentlyContinue
+          }
+          if (Test-Path "$env:ONNXRUNTIME_ROOT\lib\onnxruntime.dll") {
+            Copy-Item "$env:ONNXRUNTIME_ROOT\lib\onnxruntime.dll" artifact\ -Force -ErrorAction SilentlyContinue
+          }
+          Get-ChildItem artifact | Format-Table Name,Length
+
+      - name: Upload obs_plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs_plugin_rebuild_windows_x64
+          path: artifact/*
+          if-no-files-found: error
