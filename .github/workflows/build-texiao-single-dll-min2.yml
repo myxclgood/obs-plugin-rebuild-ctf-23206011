@@ -1,0 +1,80 @@
+name: build-texiao-single-dll-min2
+
+on:
+  push:
+    paths:
+      - 'texiao_single_source_for_ci.zip'
+      - '.github/workflows/build-texiao-single-dll-min2.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+      VCPKG_FEATURE_FLAGS: binarycaching
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract source zip
+        shell: pwsh
+        run: |
+          if (!(Test-Path texiao_single_source_for_ci.zip)) {
+            throw 'texiao_single_source_for_ci.zip not found'
+          }
+          New-Item -ItemType Directory -Force source | Out-Null
+          Expand-Archive texiao_single_source_for_ci.zip -DestinationPath source -Force
+          Get-ChildItem source | Format-Table Name,Length
+
+      - name: Setup vcpkg
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg $env:RUNNER_TEMP\vcpkg
+          & $env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat
+          echo "VCPKG_ROOT=$env:RUNNER_TEMP\vcpkg" >> $env:GITHUB_ENV
+
+      - name: Install minimal static OpenCV dnn via manifest
+        shell: pwsh
+        run: |
+          @'
+          {
+            "name": "texiao-build-deps",
+            "version-string": "0.1.0",
+            "dependencies": [
+              { "name": "opencv4", "default-features": false, "features": [ "dnn" ] }
+            ]
+          }
+          '@ | Set-Content -LiteralPath vcpkg.json -Encoding UTF8
+          & $env:VCPKG_ROOT\vcpkg.exe install --triplet x64-windows-static --clean-after-build
+
+      - name: Configure CMake single DLL
+        shell: pwsh
+        run: |
+          cmake -S source -B build -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DOBS_REBUILD_WITH_OPENCV=ON `
+            -DOBS_REBUILD_WITH_ONNXRUNTIME=OFF `
+            -DOBS_REBUILD_WITH_DIRECTML=OFF `
+            -DOBS_REBUILD_STATIC_MSVC_RUNTIME=ON `
+            -DOBS_REBUILD_OUTPUT_NAME=texiao
+
+      - name: Build texiao.dll
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Verify single artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          Copy-Item build\Release\texiao.dll artifact\texiao.dll -Force
+          Get-FileHash -Algorithm SHA256 artifact\texiao.dll | Format-List
+          Get-ChildItem artifact | Format-Table Name,Length
+
+      - name: Upload texiao single DLL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: texiao_single_dll_windows_x64_min2
+          path: artifact/texiao.dll
+          if-no-files-found: error
