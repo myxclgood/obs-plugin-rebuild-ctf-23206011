@@ -1,0 +1,72 @@
+name: build-texiao-single-dll
+
+on:
+  push:
+    paths:
+      - 'texiao_single_source_for_ci.zip'
+      - '.github/workflows/build-texiao-single-dll.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+      VCPKG_FEATURE_FLAGS: binarycaching
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract source zip
+        shell: pwsh
+        run: |
+          if (!(Test-Path texiao_single_source_for_ci.zip)) {
+            throw 'texiao_single_source_for_ci.zip not found'
+          }
+          New-Item -ItemType Directory -Force source | Out-Null
+          Expand-Archive texiao_single_source_for_ci.zip -DestinationPath source -Force
+          Get-ChildItem source | Format-Table Name,Length
+
+      - name: Setup vcpkg
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg $env:RUNNER_TEMP\vcpkg
+          & $env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat
+          echo "VCPKG_ROOT=$env:RUNNER_TEMP\vcpkg" >> $env:GITHUB_ENV
+
+      - name: Install static OpenCV dnn
+        shell: pwsh
+        run: |
+          & $env:VCPKG_ROOT\vcpkg.exe install opencv4[dnn]:x64-windows-static
+
+      - name: Configure CMake single DLL
+        shell: pwsh
+        run: |
+          cmake -S source -B build -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DOBS_REBUILD_WITH_OPENCV=ON `
+            -DOBS_REBUILD_WITH_ONNXRUNTIME=OFF `
+            -DOBS_REBUILD_WITH_DIRECTML=OFF `
+            -DOBS_REBUILD_STATIC_MSVC_RUNTIME=ON `
+            -DOBS_REBUILD_OUTPUT_NAME=texiao
+
+      - name: Build texiao.dll
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Verify single artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          Copy-Item build\Release\texiao.dll artifact\texiao.dll -Force
+          $dll = Get-Item artifact\texiao.dll
+          Get-FileHash -Algorithm SHA256 $dll.FullName | Format-List
+          Get-ChildItem artifact | Format-Table Name,Length
+
+      - name: Upload texiao single DLL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: texiao_single_dll_windows_x64
+          path: artifact/texiao.dll
+          if-no-files-found: error
